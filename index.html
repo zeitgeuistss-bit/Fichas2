@@ -118,7 +118,9 @@ input::placeholder,textarea::placeholder{color:var(--muted);opacity:.7}
 .det h3{margin:0 0 6px;font-family:var(--font-display);font-weight:600;font-size:1.15rem;text-transform:uppercase;letter-spacing:.1em;border-bottom:2px solid var(--accent);padding-bottom:4px}
 .det p.bloco{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
 .det blockquote{margin:0;padding:8px 14px;border-left:4px solid var(--accent);font-style:italic}
-.bar-in.tres{grid-template-columns:repeat(3,1fr)}
+.bar-in.tres{grid-template-columns:repeat(4,1fr);gap:8px}
+.bar-in.tres .btn{padding:12px 4px}
+.bar-in.tres3{grid-template-columns:2fr 1fr 1fr}
 @media (prefers-reduced-motion:no-preference){.btn,.cor,nav button{transition:background .15s,border-color .15s}}
 </style>
 </head>
@@ -252,8 +254,9 @@ input::placeholder,textarea::placeholder{color:var(--muted);opacity:.7}
 </div>
 
 <div class="bar" id="barra">
-  <div class="bar-in" id="barra-criar">
+  <div class="bar-in tres3" id="barra-criar">
     <button class="btn main" id="copiar" type="button">Copiar texto</button>
+    <button class="btn" id="pdf" type="button">PDF</button>
     <button class="btn" id="salvar" type="button">Salvar</button>
   </div>
   <div class="bar-in" id="barra-salvas" hidden>
@@ -266,6 +269,7 @@ input::placeholder,textarea::placeholder{color:var(--muted);opacity:.7}
   <div class="bar"><div class="bar-in tres">
     <button class="btn main" id="det-editar" type="button">Editar</button>
     <button class="btn" id="det-copiar" type="button">Copiar</button>
+    <button class="btn" id="det-pdf" type="button">PDF</button>
     <button class="btn" id="det-fechar" type="button">Fechar</button>
   </div></div>
 </div>
@@ -499,6 +503,7 @@ if("serviceWorker" in navigator){window.addEventListener("load",function(){navig
       }
       botao("Editar", function(){ estado.editando = f.id; preencher(f.d, f.cor, f.img); tagModo(); mostrar("criar"); });
       botao("Copiar", function(){ copiar(texto(f.d, f.cor, estado.formato), "Ficha copiada"); });
+      botao("PDF", function(){ gerarPDF(f.d, f.cor, f.img); });
       botao("Excluir", function(b){
         if (b.getAttribute("data-ask") !== "1") {
           b.setAttribute("data-ask","1"); b.textContent = "Confirmar exclusão";
@@ -513,7 +518,145 @@ if("serviceWorker" in navigator){window.addEventListener("load",function(){navig
     });
   }
 
+
+  /* ---------- Exportar PDF (páginas A4 desenhadas em canvas e montadas em PDF) ---------- */
+  function corHex(id){
+    var v = getComputedStyle(raiz).getPropertyValue("--c-" + id).trim();
+    return v || "#9b72e0";
+  }
+  function carregarImg(src){
+    return new Promise(function(ok){ var i = new Image(); i.onload = function(){ ok(i); }; i.onerror = function(){ ok(null); }; i.src = src; });
+  }
+  function bytesDe(dataUrl){
+    var b = atob(dataUrl.split(",")[1]), u = new Uint8Array(b.length);
+    for (var i = 0; i < b.length; i++) u[i] = b.charCodeAt(i);
+    return u;
+  }
+  function montarPDF(jpegs, w, h){
+    var enc = new TextEncoder(), partes = [], pos = 0, offs = [];
+    function add(x){ var b = typeof x === "string" ? enc.encode(x) : x; partes.push(b); pos += b.length; }
+    function obj(n, fn){ offs[n] = pos; add(n + " 0 obj\n"); fn(); add("\nendobj\n"); }
+    var n = jpegs.length, kids = [];
+    for (var i = 0; i < n; i++) kids.push((3 + 3*i) + " 0 R");
+    add("%PDF-1.4\n");
+    obj(1, function(){ add("<< /Type /Catalog /Pages 2 0 R >>"); });
+    obj(2, function(){ add("<< /Type /Pages /Kids [" + kids.join(" ") + "] /Count " + n + " >>"); });
+    jpegs.forEach(function(j, i){
+      obj(3 + 3*i, function(){ add("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595.28 841.89] /Resources << /XObject << /Im0 " + (5 + 3*i) + " 0 R >> >> /Contents " + (4 + 3*i) + " 0 R >>"); });
+      obj(4 + 3*i, function(){ var c = "q 595.28 0 0 841.89 0 0 cm /Im0 Do Q"; add("<< /Length " + c.length + " >>\nstream\n" + c + "\nendstream"); });
+      obj(5 + 3*i, function(){ add("<< /Type /XObject /Subtype /Image /Width " + w + " /Height " + h + " /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length " + j.length + " >>\nstream\n"); add(j); add("\nendstream"); });
+    });
+    var total = 3 + 3*n, x = pos;
+    add("xref\n0 " + total + "\n0000000000 65535 f \n");
+    for (var k = 1; k < total; k++) add(("0000000000" + offs[k]).slice(-10) + " 00000 n \n");
+    add("trailer\n<< /Size " + total + " /Root 1 0 R >>\nstartxref\n" + x + "\n%%EOF");
+    return new Blob(partes, { type: "application/pdf" });
+  }
+
+  var gerando = false;
+  function gerarPDF(d, cor, img){
+    if (gerando) return;
+    gerando = true; aviso("Gerando PDF...");
+    var fontes = ['700 80px "Saira Condensed"', '600 30px "Saira Condensed"', '400 30px "IBM Plex Sans"', '500 30px "IBM Plex Sans"', 'italic 400 30px "IBM Plex Sans"'];
+    var espera = (document.fonts && document.fonts.load) ? Promise.all(fontes.map(function(f){ return document.fonts.load(f).catch(function(){}); })) : Promise.resolve();
+    espera.then(function(){ return img ? carregarImg(img) : null; }).then(function(im){
+      var W = 1240, H = 1754, M = 96, paginas = [], cv, ctx, y;
+      var TINTA = "#17151f", MUDO = "#6b6878", ACENTO = corHex(cor);
+      var FD = '"Saira Condensed","Arial Narrow",sans-serif', FB = '"IBM Plex Sans",Arial,sans-serif';
+      function nova(){
+        cv = document.createElement("canvas"); cv.width = W; cv.height = H; ctx = cv.getContext("2d");
+        ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, W, H);
+        ctx.fillStyle = ACENTO; ctx.fillRect(0, 0, W, 22);
+        paginas.push(cv); y = M + 10;
+      }
+      function quebrar(txt, fonte, larg){
+        ctx.font = fonte; var out = [];
+        String(txt).split("\n").forEach(function(par){
+          if (!par.trim()) { out.push(""); return; }
+          var atual = "";
+          par.split(/\s+/).filter(Boolean).forEach(function(p){
+            while (ctx.measureText(p).width > larg) {
+              var k = p.length; while (k > 1 && ctx.measureText(p.slice(0, k)).width > larg) k--;
+              if (atual) { out.push(atual); atual = ""; }
+              out.push(p.slice(0, k)); p = p.slice(k);
+            }
+            var t = atual ? atual + " " + p : p;
+            if (ctx.measureText(t).width > larg && atual) { out.push(atual); atual = p; } else atual = t;
+          });
+          if (atual) out.push(atual);
+        });
+        return out;
+      }
+      function bloco(titulo, txt){
+        var fT = "600 38px " + FD, fC = "400 29px " + FB, LH = 44;
+        var ls = quebrar(txt, fC, W - 2*M);
+        if (y + 90 + LH * Math.min(ls.length, 3) > H - M) nova();
+        ctx.font = fT; ctx.fillStyle = TINTA; ctx.fillText(titulo.toUpperCase(), M, y + 34);
+        y += 50; ctx.fillStyle = ACENTO; ctx.fillRect(M, y, W - 2*M, 4); y += 34;
+        ls.forEach(function(l){
+          if (y + LH > H - M) { nova(); }
+          ctx.font = fC; ctx.fillStyle = TINTA; ctx.fillText(l, M, y + 30); y += LH;
+        });
+        y += 38;
+      }
+
+      nova();
+      var x0 = M, wR = W - 2*M, topo = y, fimImg = topo;
+      if (im) {
+        var iw = 400, ih = 533, esc = Math.max(iw / im.width, ih / im.height);
+        var sw = iw / esc, sh = ih / esc;
+        ctx.drawImage(im, (im.width - sw) / 2, (im.height - sh) / 2, sw, sh, M, topo, iw, ih);
+        ctx.fillStyle = ACENTO; ctx.fillRect(M, topo + ih, iw, 10);
+        fimImg = topo + ih + 10; x0 = M + iw + 52; wR = W - M - x0;
+      }
+      var yy = topo;
+      quebrar((d.nome || "Sem nome").toUpperCase(), "700 96px " + FD, wR).forEach(function(l){
+        ctx.font = "700 96px " + FD; ctx.fillStyle = TINTA; ctx.fillText(l, x0, yy + 80); yy += 92;
+      });
+      if (d.titulo) {
+        yy += 8;
+        quebrar(d.titulo, "italic 400 34px " + FB, wR).forEach(function(l){
+          ctx.font = "italic 400 34px " + FB; ctx.fillStyle = MUDO; ctx.fillText(l, x0, yy + 34); yy += 46;
+        });
+      }
+      yy += 20; ctx.fillStyle = ACENTO; ctx.fillRect(x0, yy, 120, 6); yy += 42;
+      CAMPOS.forEach(function(c){
+        if (c[0] === "nome" || c[0] === "titulo" || !d[c[0]]) return;
+        ctx.font = "500 22px " + FB; ctx.fillStyle = MUDO; ctx.fillText(c[1].toUpperCase(), x0, yy + 22); yy += 32;
+        quebrar(d[c[0]], "500 30px " + FB, wR).forEach(function(l){
+          ctx.font = "500 30px " + FB; ctx.fillStyle = TINTA; ctx.fillText(l, x0, yy + 28); yy += 42;
+        });
+        yy += 16;
+      });
+      y = Math.max(fimImg, yy) + 50;
+      BLOCOS.forEach(function(b){ if (d[b[0]]) bloco(b[1], d[b[0]]); });
+      if (d.frase) {
+        var fq = "italic 400 36px " + FB, lq = quebrar("“" + d.frase + "”", fq, W - 2*M - 40), hq = lq.length * 50;
+        if (y + hq > H - M) nova();
+        ctx.fillStyle = ACENTO; ctx.fillRect(M, y, 8, hq);
+        lq.forEach(function(l, i){ ctx.font = fq; ctx.fillStyle = TINTA; ctx.fillText(l, M + 32, y + 36 + i*50); });
+      }
+      var n = paginas.length;
+      paginas.forEach(function(p, i){
+        var c = p.getContext("2d");
+        c.font = "400 22px " + FB; c.fillStyle = MUDO; c.textAlign = "left";
+        c.fillText((d.nome || "Sem nome") + "  ·  Ficha de Personagem", M, H - 48);
+        c.textAlign = "right"; c.fillText((i + 1) + " / " + n, W - M, H - 48);
+      });
+      var blob = montarPDF(paginas.map(function(p){ return bytesDe(p.toDataURL("image/jpeg", 0.9)); }), W, H);
+      var nomeArq = ((d.nome || "ficha").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "ficha") + ".pdf";
+      var url = URL.createObjectURL(blob), a = document.createElement("a");
+      a.href = url; a.download = nomeArq; document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(function(){ URL.revokeObjectURL(url); }, 60000);
+      aviso("PDF gerado: " + nomeArq);
+    }).catch(function(){ aviso("Não consegui gerar o PDF"); }).then(function(){ gerando = false; });
+  }
+
   el("tab-criar").addEventListener("click", function(){ mostrar("criar"); });
+  el("pdf").addEventListener("click", function(){ gerarPDF(dados(), estado.cor, estado.img); });
+  el("det-pdf").addEventListener("click", function(){
+    var f = fichas().filter(function(x){ return x.id === abertaId; })[0]; if (f) gerarPDF(f.d, f.cor, f.img);
+  });
   el("tab-salvas").addEventListener("click", function(){ mostrar("salvas"); });
   el("tab-galeria").addEventListener("click", function(){ mostrar("galeria"); });
   el("img-btn").addEventListener("click", function(){ el("img-file").click(); });
